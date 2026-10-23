@@ -1,0 +1,1 @@
+# trashify-object-detector
