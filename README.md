@@ -38,7 +38,7 @@ I fine-tuned `facebook/detr-resnet-50` on a small, hand-labelled dataset (1,128 
 | mAP@50, all 7 classes | 27.6% | 38.4% | +10.9 pts |
 | mAP@[.5:.95], all 7 classes | 17.4% | 25.9% | +8.5 pts |
 | Macro-F1 at validation-tuned threshold | 71.0% | **81.1%** | +10.1 pts |
-| Joint detection rate (bin + hand + trash) | 56.8% | **83.1%** | +26.3 pts |
+| Joint detection rate (bin + hand + trash) | 56.8% | **83.1%** | +26.2 pts |
 | Mean end-to-end latency (T4 GPU, batch 1) | 44.0 ms | 43.1 ms | about the same |
 
 What I want a reader to take away:
@@ -84,9 +84,9 @@ Box-level mAP alone does not tell you whether the feature works, which is why th
 | 4 | `not_trash` | Hard negative: ground cover or non-litter |
 
 - **Splits** (seed 42, two-stage `train_test_split`):
-  1. 70% train / 30% holdout.
-  2. Holdout split again into validation and test.
-  - Result: **789 train / 115 validation / 224 test**. An assertion checks that the three splits sum to the original 1,128 (no leakage or loss).
+  1. 70% train / 30% holdout (`test_size=0.3`).
+  2. Holdout split again with `test_size=0.66`, giving roughly 10% validation and 20% test of the full dataset.
+  - Result: **789 train / 115 validation / 224 test** (about 70 / 10 / 20). An assertion checks that the three splits sum to the original 1,128 (no leakage or loss).
 - **Eligible test images:** 183 of the 224 test images (81.7%) contain all three of `bin`, `hand`, `trash` in the ground truth. These are used for the joint detection metric.
 
 I visualized ground-truth boxes (XYWH to XYXY via `torchvision.ops.box_convert`, drawn with `draw_bounding_boxes`) on random samples to confirm the coordinates were not shifted, swapped, or inverted before training anything.
@@ -198,7 +198,7 @@ Box handling: `BboxParams(format="coco", min_area=16, min_visibility=0.2)` drops
 - **Gradient clipping at 0.1** and weight decay 1e-4 come from the DETR paper's recipe and help stabilize attention training.
 - **Augmentation** targets the main risk of a 789-image training set: overfitting and sensitivity to lighting and handedness.
 - **Caveat:** v2 changed augmentation, schedule, and learning rates **at the same time**, so the v1-to-v2 gain measures the whole recipe, not any single change. No per-component ablation was run.
-- **Observation:** the best v2 checkpoint was `checkpoint-1000`, the **last step**. Validation loss was still improving at epoch 20, so the model had not clearly overfit and more epochs might help.
+- **Observation:** the best v2 checkpoint was `checkpoint-1000`, the **last step**. Validation loss was still edging down at epoch 20 (1.021 at epoch 16 to 1.019 at epoch 20), so the model had not clearly overfit. However, validation mAP was essentially flat from about epoch 15 (about 0.30), so the remaining headroom from training longer is probably small.
 
 ---
 
@@ -325,7 +325,7 @@ These are the things a careful reviewer should know, and I would rather state th
 2. **Small, single-source evaluation.** The test set has 224 images, all with `image_source = manual_taken_photo`. There is no breakdown by viewpoint or camera, and no confidence intervals. Results come from a single training run (one seed), so small differences should not be over-interpreted.
 3. **Target-class vs 7-class mAP.** Headline numbers use the three target classes. The negative classes (`not_bin`, `not_hand`) and `trash_arm` score 0 AP, and `not_trash` reaches 19.2 AP@50, so the 7-class mAP is 38.4% for v2.
 4. **Joint detection rate is recall-only.** It does not quantify false verifications on images that are not real cleanups. A false-accept rate would require a labelled set of negative images, which I did not build.
-5. **Out-of-distribution robustness is not established.** I ran the model on a single external web image (a person putting trash in a bin); in that check only the `bin` was detected (score 0.79), with `hand` and `trash` missed. One image is an anecdote, not a study, but it suggests the model may not generalize well to different viewpoints.
+5. **Out-of-distribution robustness is not established.** I ran the model on a single external web image (a person putting trash in a bin); in that check (v2 model, confidence threshold 0.4, image resized to 640x640) only the `bin` was detected (score 0.79), with `hand` and `trash` missed. One image is an anecdote, not a study, but it suggests the model may not generalize well to different viewpoints.
 6. **Small objects.** The v1 test results show zero AP/recall for small objects, and `trash` is the weakest class in the joint metric. Input resolution is capped at 640 px.
 7. **`hand` precision is about 60%** at the operating threshold, so false-positive hands are the main box-level error mode. I have hypotheses (confusion with `not_hand`, `trash_arm`, or background) but did not run a confusion analysis, so I do not claim a cause.
 8. **Checkpoint selection used validation loss, not mAP.** It is simple and stable, but validation mAP could select a different epoch.
@@ -344,7 +344,7 @@ These are the things a careful reviewer should know, and I would rather state th
 - **Hard-negative mining** and more data for `not_*` classes and `trash_arm`, or drop those classes if they are not needed for the product.
 - **Per-source / per-viewpoint evaluation** once the data includes more than one source, and a proper OOD test set.
 - **Production hardening:** ONNX/TensorRT export, fp16 inference, batching, CPU latency numbers, input validation, and monitoring.
-- **Train longer:** the best v2 checkpoint was the final one, so there may be headroom.
+- **Train longer:** the best v2 checkpoint was the final one, but validation loss was improving only marginally and validation mAP had plateaued (about 0.30 from epoch 15), so any gain is likely small.
 
 ---
 
@@ -359,7 +359,7 @@ pip install -U datasets gradio "torchmetrics[detection]" pycocotools albumentati
 Then run the notebook top to bottom. In order, it:
 
 1. Loads and inspects the dataset and visualizes ground-truth boxes.
-2. Creates the 70/15/15-style split (seed 42): 789 / 115 / 224 images.
+2. Creates the roughly 70/10/20 train/validation/test split (seed 42): 789 / 115 / 224 images.
 3. Builds the model, image processor, annotation formatter, collator, and metric function.
 4. Trains **v1** (10 epochs) and **v2** (20 epochs, augmentation, differential LR).
 5. Evaluates both on the test set (mAP/mAR, per class, threshold sweep, joint detection, latency).
